@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Depends, HTTPException
 from fastapi_socketio import SocketManager
 from starlette.middleware.sessions import SessionMiddleware
 from starlette.requests import Request
@@ -17,11 +17,6 @@ from fastapi.responses import RedirectResponse
 from fastapi.responses import JSONResponse
 import urllib.parse
 import json
-from pydantic import BaseModel
-from fastapi import Response
-from fastapi import Body
-import google.auth.transport.requests
-from google.oauth2 import id_token
 
 load_dotenv()
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -57,8 +52,9 @@ async def add_headers(request, call_next):
     return response
 
 # sio = SocketManager(app=app, mount_location="/socket.io", cors_allowed_origins=["*"], async_mode="asgi")
-sio = SocketManager(app=app, mount_location="/socket.io", cors_allowed_origins=["http://localhost:5173"], async_mode="asgi")
+sio = SocketManager(app=app, mount_location="/socket.io", cors_allowed_origins=["*"], async_mode="asgi")
 
+active_connections = set()
 
 def get_db():
     db = SessionLocal()
@@ -185,102 +181,107 @@ async def auth_callback(request: Request, db: Session = Depends(get_db)):
         return JSONResponse(content={"error": str(e)}, status_code=400)
 
 
+@app.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Handles WebSocket connections for task management."""
+    await websocket.accept()
+    active_connections.add(websocket)
+    print(f"🔗 Client connected: {websocket.client}")
 
-@app.get("/auth/logout")
-async def logout(request: Request):
-    request.session.clear()
-    return {"message": "Logged out successfully"}
+    try:
+        while True:
+            # Receive the message from the client
+            data = await websocket.receive_text()
+            print(f"Received WebSocket message: {data}")
 
-# Task CRUD APIs with Real-Time Events
+            message = json.loads(data)
+            action = message.get("action")
+            token = message.get("token")
+            
+            if not token:
+                print("⚠ No token received. Closing connection.")
+                await websocket.send_text(json.dumps({"error": "No token provided"}))
+                await websocket.close()
+                return
+            
+            db = SessionLocal()
+            user = get_current_user(token, db)
 
-class TaskCreate(BaseModel):
-    title: str
-    description: str
+            # fetch tasks
+            if action == "get_tasks":
+                tasks = db.query(Task).filter(Task.owner_id == user.id).all()
+                tasks_list = [
+                    {
+                        "id": task.id,
+                        "title": task.title,
+                        "description": task.description,
+                        "completed": task.completed,
+                        "tags": task.tags
+                    }
+                    for task in tasks
+                ]
+                print(f"Sending task list: {tasks_list}")
+                await websocket.send_text(json.dumps({"event": "task_list", "tasks": tasks_list}))
+
+            elif action == "add_task":
+                task = message.get("task")
+                # generate tag via Gemini AI
+                print("Generating task tag with Gemini AI...")
+                selected_tag = generate_task_tagsGAI(task["title"], task["description"])
+                print(f"Selected Tag: {selected_tag}")
+                task_obj = Task(
+                    id=str(uuid.uuid4()),
+                    title=task["title"],
+                    description=task["description"],
+                    completed=False,
+                    owner_id=user.id,
+                    tags=selected_tag
+                )
+                db.add(task_obj)
+                db.commit()
+                db.refresh(task_obj)
+
+                task_data = {
+                    "id": task_obj.id,
+                    "title": task_obj.title,
+                    "description": task_obj.description,
+                    "completed": task_obj.completed,
+                    "owner_id": task_obj.owner_id,
+                    "tags": task_obj.tags
+                }
+
+                print(f"Broadcasting new task: {task_data}")
+                await broadcast_message({"event": "task_created", "task": task_data})
+
+            elif action == "delete_task":
+                task_id = message.get("task_id")
+                task = db.query(Task).filter(Task.id == task_id, Task.owner_id == user.id).first()
+
+                if task:
+                    db.delete(task)
+                    db.commit()
+                    print(f"Broadcasting task deleted: {task_id}")
+                    await broadcast_message({"event": "task_deleted", "task_id": task_id})
+                else:
+                    print(f"⚠ Task {task_id} not found")
+                    await websocket.send_text(json.dumps({"error": "Task not found"}))
+
+            db.close()
+
+    except WebSocketDisconnect:
+        active_connections.remove(websocket)
+        print(f"Client disconnected: {websocket.client}")
 
 
-@app.post("/tasks/")
-async def create_task(task: TaskCreate, token: str, db: Session = Depends(get_db)):
-    user = get_current_user(token, db)
-
-    print("Generating task tag with Gemini AI...")
-    selected_tag = generate_task_tagsGAI(task.title, task.description)
-    print(f"Selected Tag: {selected_tag}")
-
-    task_obj = Task(
-        id=str(uuid.uuid4()),
-        title=task.title,
-        description=task.description,
-        completed=False,
-        owner_id=user.id,
-        tags=selected_tag
-    )
+async def broadcast_message(message: dict):
+    """Sends a message to all connected WebSocket clients."""
+    print(f"Broadcasting message to {len(active_connections)} clients: {message}")
+    disconnected_clients = []
+    for connection in active_connections:
+        try:
+            await connection.send_text(json.dumps(message))
+        except:
+            disconnected_clients.append(connection)
     
-    db.add(task_obj)
-    db.commit()
-    db.refresh(task_obj)
-
-    task_data = {
-        "id": task_obj.id,
-        "title": task_obj.title,
-        "description": task_obj.description,
-        "completed": task_obj.completed,
-        "owner_id": task_obj.owner_id,
-        "tags": task_obj.tags
-    }
-    
-    await sio.emit("task_created", {"task": task_data})
-
-    return {"task": task_data}
-
-
-
-@app.get("/tasks/")
-async def get_tasks(token: str, db: Session = Depends(get_db)):
-    user = get_current_user(token, db)
-    tasks = db.query(Task).filter(Task.owner_id == user.id).all()
-    return {"tasks": tasks}
-
-class TaskUpdate(BaseModel):
-    title: str
-    description: str
-    completed: bool
-
-@app.put("/tasks/{task_id}")
-async def update_task(task_id: str, task_update: TaskUpdate, token: str, db: Session = Depends(get_db)):
-    user = get_current_user(token, db)
-    task = db.query(Task).filter(Task.id == task_id, Task.owner_id == user.id).first()
-
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    task.title = task_update.title
-    task.description = task_update.description
-    task.completed = task_update.completed
-    db.commit()
-    db.refresh(task)
-
-    await sio.emit("task_updated", {"task": {
-        "id": task.id,
-        "title": task.title,
-        "description": task.description,
-        "completed": task.completed
-    }})
-
-    return {"task": task}
-
-
-@app.delete("/tasks/{task_id}")
-async def delete_task(task_id: str, token: str, db: Session = Depends(get_db)):
-    user = get_current_user(token, db)
-    task = db.query(Task).filter(Task.id == task_id, Task.owner_id == user.id).first()
-
-    if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
-
-    db.delete(task)
-    db.commit()
-
-    await sio.emit("task_deleted", {"task_id": task_id})
-
-    return {"message": "Task deleted successfully"}
-
+    for connection in disconnected_clients:
+        active_connections.remove(connection)
