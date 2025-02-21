@@ -7,11 +7,10 @@ const Login = () => {
   const navigate = useNavigate();
 
   const handleLogin = () => {
-    window.location.href = "http://127.0.0.1:8000/auth/login"; 
+    window.location.href = "https://ami.polotrax.com/auth/login";
   };
 
   useEffect(() => {
-    
     const token = localStorage.getItem("token");
     if (token) {
       navigate("/dashboard");
@@ -25,8 +24,8 @@ const Login = () => {
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        height: "100vh", 
-        backgroundColor: "#0D0D0D", 
+        height: "100vh",
+        backgroundColor: "#0D0D0D",
         color: "white",
         textAlign: "center",
       }}
@@ -37,13 +36,12 @@ const Login = () => {
           fontFamily: "'Poppins', sans-serif",
           fontWeight: "600",
           letterSpacing: "1px",
-          mb: 3, 
+          mb: 3,
         }}
       >
         Sign in to Task Manager
       </Typography>
 
-      
       <Button
         onClick={handleLogin}
         variant="contained"
@@ -53,7 +51,7 @@ const Login = () => {
           fontWeight: "bold",
           px: 4,
           py: 1.5,
-          borderRadius: "25px", 
+          borderRadius: "25px",
           fontSize: "16px",
           textTransform: "none",
           display: "flex",

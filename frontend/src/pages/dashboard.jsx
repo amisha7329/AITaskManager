@@ -58,8 +58,7 @@ const Dashboard = () => {
       return;
     }
 
-
-    const newSocket = new WebSocket("ws://127.0.0.1:8000/ws");
+    const newSocket = new WebSocket("wss://ami.polotrax.com/ws");
 
     setSocket(newSocket);
 

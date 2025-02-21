@@ -140,7 +140,7 @@ async def login(request: Request):
     request.session.clear()
     return await oauth.google.authorize_redirect(
         request,
-        redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://127.0.0.1:8000/auth/callback"),
+        redirect_uri=os.getenv("GOOGLE_REDIRECT_URI", "http://ami.polotrax.com/auth/callback"),
         prompt="select_account",
     )
 
